@@ -92,6 +92,8 @@ chosen frequency, and that your antenna or attenuator is connected safely.
 The GUI can start and stop the modem process, change settings live, switch the
 TX source between BERT and data, and plot receiver telemetry.
 
+![Modem control GUI showing a locked 8PSK link](Screenshot.png)
+
 ### Sending packets
 
 With the TX source set to `data`, any KISS TCP client can connect to the
