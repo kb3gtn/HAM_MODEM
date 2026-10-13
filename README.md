@@ -6,6 +6,10 @@ at up to 48 kbps using phase-shift keying, and presents them to the host as a
 standard KISS TNC over TCP, so it works with existing packet software
 (`tncattach`, Linux AX.25, etc.).
 
+Working on a new Soapy_backend version that should work with other SDRs. 
+I have tested using a bladeRF Mini 2.0 A4 and a UHD B200 board.
+Should work, but unverified: LimeSDR, HackRF, SDRPlay, PlutoSDR, OsmoSDR, RTL-SDR (RX ONLY)
+
 ## Features
 
 - **Modulation:** BPSK, QPSK or 8PSK (Gray mapped), root-raised-cosine pulse
