@@ -9,8 +9,29 @@ crossbeam-channel = "0.5"
 rumqttc = { version = "0.25.1", default-features = false }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-bladerf = { git = "https://github.com/MerchGuardian/seify-bladerf.git", package = "bladerf" }
+bladerf = { git = "https://github.com/MerchGuardian/seify-bladerf.git", package = "bladerf", optional = true }
 num-complex = "0.4"
 rubato = "5.0.0"
 audioadapter-buffers = "5.2.0"
 rustfft = "6.4.1"
+soapysdr = { version = "0.5.1", optional = true }
+
+[features]
+default = ["bladerf"]
+# SDR backends. The DSP core builds without any of them (tests use mock radios).
+bladerf = ["dep:bladerf"]
+soapy = ["dep:soapysdr"]
+
+# Bench tools that talk to the bladeRF directly.
+[[bin]]
+name = "dc_calibrate"
+required-features = ["bladerf"]
+[[bin]]
+name = "loopback_capture"
+required-features = ["bladerf"]
+[[bin]]
+name = "rf_loopback_capture"
+required-features = ["bladerf"]
+[[bin]]
+name = "rx_dc_calibrate"
+required-features = ["bladerf"]

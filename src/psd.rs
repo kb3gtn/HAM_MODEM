@@ -11,7 +11,7 @@ pub struct PsdPoint {
 }
 
 /// Convert bladeRF SC16Q11 samples back to normalized complex floats.
-pub fn complex_i16_to_f32(samples: &[bladerf::ComplexI16]) -> Vec<Complex32> {
+pub fn complex_i16_to_f32(samples: &[crate::Iq16]) -> Vec<Complex32> {
     samples
         .iter()
         .map(|c| Complex32::new(c.re as f32 / 2048.0, c.im as f32 / 2048.0))
@@ -24,7 +24,7 @@ pub fn complex_i16_to_f32(samples: &[bladerf::ComplexI16]) -> Vec<Complex32> {
 /// to ~0 over enough samples, so this isolates the DC term without needing
 /// an FFT, and works whether or not real data is being transmitted at the
 /// same time.
-pub fn complex_mean(samples: &[bladerf::ComplexI16]) -> Complex32 {
+pub fn complex_mean(samples: &[crate::Iq16]) -> Complex32 {
     assert!(!samples.is_empty(), "cannot take the mean of zero samples");
     // Accumulate in f64: a running sum over hundreds of thousands of i16
     // samples can reach magnitudes where f32's ~7 significant digits start
@@ -141,11 +141,11 @@ mod tests {
     fn complex_mean_isolates_a_constant_offset_from_zero_mean_noise() {
         // A constant DC term plus a zero-mean alternating +-full-scale signal:
         // the mean should recover just the DC term, independent of the data.
-        let dc = bladerf::ComplexI16::new(200, -100);
-        let samples: Vec<bladerf::ComplexI16> = (0..10_000)
+        let dc = crate::Iq16::new(200, -100);
+        let samples: Vec<crate::Iq16> = (0..10_000)
             .map(|i| {
                 let wobble = if i % 2 == 0 { 2000 } else { -2000 };
-                bladerf::ComplexI16::new(dc.re + wobble, dc.im - wobble)
+                crate::Iq16::new(dc.re + wobble, dc.im - wobble)
             })
             .collect();
         let mean = complex_mean(&samples);

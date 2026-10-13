@@ -118,3 +118,16 @@ mod tests {
         assert_eq!(lfsr.register, initial);
     }
 }
+
+/// Parse a CLI pattern name (`pn11` | `pn15` | `pn23`); unknown names fall back to PN15.
+pub fn parse_pattern(s: &str) -> PrbsPattern {
+    match s.to_lowercase().as_str() {
+        "pn11" => PrbsPattern::Pn11,
+        "pn23" => PrbsPattern::Pn23,
+        "pn15" => PrbsPattern::Pn15,
+        other => {
+            eprintln!("Unknown pattern '{other}', defaulting to pn15");
+            PrbsPattern::Pn15
+        }
+    }
+}

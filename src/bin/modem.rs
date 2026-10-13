@@ -64,18 +64,15 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use bladerf::{
-    BladeRF, BladeRfAny, Channel, ChannelLayoutRx, ChannelLayoutTx, ComplexI16, GainMode, Loopback,
-    RxChannel, RxSyncStream, StreamConfig, TxChannel, TxSyncStream,
-};
 use crossbeam_channel::{bounded, Sender};
 use rumqttc::{Client, Event, LastWill, MqttOptions, Packet, QoS};
 
-use ham_modem::capture::parse_pattern;
 use ham_modem::kiss::KissServer;
 use ham_modem::modem::*;
 use ham_modem::params::*;
+use ham_modem::prbs::parse_pattern;
 use ham_modem::prbs::PrbsPattern;
+use ham_modem::radio::{self, RadioConfig};
 use ham_modem::symbol_map::Modulation;
 
 const STATUS_INTERVAL: Duration = Duration::from_secs(1);
@@ -105,6 +102,10 @@ usage: modem [options]
   --mqtt-host H      MQTT broker host                             (127.0.0.1)
   --mqtt-port N      MQTT broker port                             (1883)
   --mqtt-topic T     MQTT base topic                              (psk8)
+  --radio NAME       SDR backend                                  (bladerf)
+  --device-args S    SoapySDR device args, --radio soapy only      (driver=bladerf)
+  --tx-channel N     SoapySDR TX port, 0-indexed                   (0)
+  --rx-channel N     SoapySDR RX port, 0-indexed (bladeRF RX2 = 1) (0)
   --no-tx            receive only (TX1 untouched)
   --no-rx            transmit only
   --loopback MODE    none | rfic-bist: loop TX back into RX1 inside the radio
@@ -113,6 +114,10 @@ usage: modem [options]
   -h, --help         this text";
 
 struct Args {
+    device_args: String,
+    tx_channel: usize,
+    rx_channel: usize,
+    radio: String,
     tx_freq: u64,
     rx_freq: u64,
     tx_gain: i32,
@@ -157,6 +162,10 @@ impl Args {
             mqtt_topic: "psk8".into(),
             tx_enabled: true,
             rx_enabled: true,
+            radio: "bladerf".into(),
+            device_args: "driver=bladerf".into(),
+            tx_channel: 0,
+            rx_channel: 0,
             loopback: "none".into(),
         }
     }
@@ -221,6 +230,18 @@ impl Args {
                 "--mqtt-topic" => a.mqtt_topic = value(flag)?,
                 "--no-tx" => a.tx_enabled = false,
                 "--no-rx" => a.rx_enabled = false,
+                "--device-args" => a.device_args = value(flag)?,
+                "--tx-channel" => {
+                    a.tx_channel = value(flag)?
+                        .parse()
+                        .map_err(|e| format!("--tx-channel: {e}"))?
+                }
+                "--rx-channel" => {
+                    a.rx_channel = value(flag)?
+                        .parse()
+                        .map_err(|e| format!("--rx-channel: {e}"))?
+                }
+                "--radio" => a.radio = value(flag)?.to_lowercase(),
                 "--loopback" => {
                     a.loopback = value(flag)?.to_lowercase();
                     // (The FPGA "firmware" loopback is deliberately not offered: it
@@ -244,119 +265,6 @@ impl Args {
             return Err("--no-tx and --no-rx together leave nothing to run".into());
         }
         Ok(Some(a))
-    }
-}
-
-// ------------------------------------------------------------------------
-// bladeRF radios
-// ------------------------------------------------------------------------
-
-type TxStream = TxSyncStream<Arc<BladeRfAny>, ComplexI16, BladeRfAny>;
-type RxStream = RxSyncStream<Arc<BladeRfAny>, ComplexI16, BladeRfAny>;
-
-/// Stream buffers sized to the sample rate (~160 ms of samples in 16 buffers).
-fn stream_config_for(hardware_sample_rate: u32) -> StreamConfig {
-    StreamConfig::new(
-        16,
-        chunk_frames_for(hardware_sample_rate),
-        8,
-        Duration::from_millis(3500),
-    )
-    .expect("valid stream config")
-}
-
-struct BladeTx {
-    dev: Arc<BladeRfAny>,
-    channel: Channel,
-    layout: TxChannel,
-    /// `None` only transiently, while `set_sample_rate` reconfigures it.
-    stream: Option<TxStream>,
-}
-
-impl TxRadio for BladeTx {
-    fn write(&mut self, iq: &[ComplexI16]) -> Result<(), String> {
-        self.stream
-            .as_ref()
-            .ok_or("tx stream is not available")?
-            .write(iq, Duration::from_secs(2))
-            .map_err(|e| e.to_string())
-    }
-    fn set_gain(&mut self, db: i32) -> Result<(), String> {
-        self.dev
-            .set_gain(self.channel, db)
-            .map_err(|e| e.to_string())
-    }
-    fn set_frequency(&mut self, hz: u64) -> Result<(), String> {
-        self.dev
-            .set_frequency(self.channel, hz)
-            .map_err(|e| e.to_string())
-    }
-    fn set_sample_rate(&mut self, hz: u32, analog_bandwidth_hz: u32) -> Result<(), String> {
-        let stream = self.stream.take().ok_or("tx stream is not available")?;
-        stream
-            .disable()
-            .map_err(|e| format!("disable TX stream: {e}"))?;
-        self.dev
-            .set_sample_rate(self.channel, hz)
-            .map_err(|e| format!("set TX sample rate: {e}"))?;
-        self.dev
-            .set_bandwidth(self.channel, analog_bandwidth_hz)
-            .map_err(|e| format!("set TX bandwidth: {e}"))?;
-        let stream = stream
-            .reconfigure::<ComplexI16>(stream_config_for(hz), ChannelLayoutTx::SISO(self.layout))
-            .map_err(|e| format!("reconfigure TX stream: {e}"))?;
-        stream
-            .enable()
-            .map_err(|e| format!("enable TX stream: {e}"))?;
-        self.stream = Some(stream);
-        Ok(())
-    }
-}
-
-struct BladeRx {
-    dev: Arc<BladeRfAny>,
-    channel: Channel,
-    layout: RxChannel,
-    stream: Option<RxStream>,
-}
-
-impl RxRadio for BladeRx {
-    fn read(&mut self, buf: &mut [ComplexI16]) -> Result<(), String> {
-        self.stream
-            .as_ref()
-            .ok_or("rx stream is not available")?
-            .read(buf, Duration::from_secs(2))
-            .map_err(|e| e.to_string())
-    }
-    fn set_gain(&mut self, db: i32) -> Result<(), String> {
-        self.dev
-            .set_gain(self.channel, db)
-            .map_err(|e| e.to_string())
-    }
-    fn set_frequency(&mut self, hz: u64) -> Result<(), String> {
-        self.dev
-            .set_frequency(self.channel, hz)
-            .map_err(|e| e.to_string())
-    }
-    fn set_sample_rate(&mut self, hz: u32, analog_bandwidth_hz: u32) -> Result<(), String> {
-        let stream = self.stream.take().ok_or("rx stream is not available")?;
-        stream
-            .disable()
-            .map_err(|e| format!("disable RX stream: {e}"))?;
-        self.dev
-            .set_sample_rate(self.channel, hz)
-            .map_err(|e| format!("set RX sample rate: {e}"))?;
-        self.dev
-            .set_bandwidth(self.channel, analog_bandwidth_hz)
-            .map_err(|e| format!("set RX bandwidth: {e}"))?;
-        let stream = stream
-            .reconfigure::<ComplexI16>(stream_config_for(hz), ChannelLayoutRx::SISO(self.layout))
-            .map_err(|e| format!("reconfigure RX stream: {e}"))?;
-        stream
-            .enable()
-            .map_err(|e| format!("enable RX stream: {e}"))?;
-        self.stream = Some(stream);
-        Ok(())
     }
 }
 
@@ -436,101 +344,28 @@ fn main() {
     println!();
 
     // ---- radio ----
-    let dev = Arc::new(BladeRfAny::open_first().unwrap_or_else(|e| {
-        fail(format!(
-            "cannot open the bladeRF (is it plugged in? is another program using it?): {e}"
-        ))
-    }));
-    if !dev.is_fpga_configured().unwrap_or(false) {
-        eprintln!("FPGA is not loaded. Run, e.g.:");
-        eprintln!("  bladeRF-cli -e \"load fpga /usr/share/bladerf/fpga/hostedxA4.rbf\"");
-        exit(1);
-    }
-    let loopback_mode = match args.loopback.as_str() {
-        "rfic-bist" => Loopback::RficBist,
-        _ => Loopback::None,
-    };
-    // SAFETY: only valid Loopback variants are constructed above.
-    unsafe { dev.set_loopback(loopback_mode) }
-        .unwrap_or_else(|e| fail(format!("set loopback mode: {e}")));
-
-    // IMPORTANT: this crate's channel enums are 0-indexed (Tx0, Rx0, Rx1),
-    // matching libbladeRF's internal macros, while Nuand's silkscreen and
-    // bladeRF-cli call the ports "TX1"/"RX1"/"RX2" (1-indexed). So physical
-    // TX1 = Tx0 and physical RX2 = Rx1. The internal loopbacks pair TX1 with
-    // RX1 (= Rx0).
-    let tx_channel = TxChannel::Tx0;
-    let rx_channel = if loopback_on {
-        RxChannel::Rx0
-    } else {
-        RxChannel::Rx1
-    };
-    let tx_ch: Channel = tx_channel.into();
-    let rx_ch: Channel = rx_channel.into();
-
     let hardware_rate = hardware_sample_rate_for(args.symbol_rate);
     let analog_bandwidth = analog_bandwidth_hz(args.symbol_rate);
     println!("SDR sample rate {hardware_rate} Hz, analog bandwidth {analog_bandwidth} Hz");
-    let mut tx_radio = None;
-    let mut rx_radio = None;
-    if args.tx_enabled {
-        dev.set_frequency(tx_ch, args.tx_freq)
-            .unwrap_or_else(|e| fail(format!("set TX frequency: {e}")));
-        dev.set_sample_rate(tx_ch, hardware_rate)
-            .unwrap_or_else(|e| fail(format!("set TX sample rate: {e}")));
-        dev.set_bandwidth(tx_ch, analog_bandwidth)
-            .unwrap_or_else(|e| fail(format!("set TX bandwidth: {e}")));
-        dev.set_gain(tx_ch, args.tx_gain)
-            .unwrap_or_else(|e| fail(format!("set TX gain: {e}")));
-    }
-    if args.rx_enabled {
-        dev.set_frequency(rx_ch, args.rx_freq)
-            .unwrap_or_else(|e| fail(format!("set RX frequency: {e}")));
-        dev.set_sample_rate(rx_ch, hardware_rate)
-            .unwrap_or_else(|e| fail(format!("set RX sample rate: {e}")));
-        dev.set_bandwidth(rx_ch, analog_bandwidth)
-            .unwrap_or_else(|e| fail(format!("set RX bandwidth: {e}")));
-        // Manual, not AGC: a fixed known gain gives a repeatable level.
-        dev.set_gain_mode(rx_ch, GainMode::Manual)
-            .unwrap_or_else(|e| fail(format!("set RX gain mode: {e}")));
-        dev.set_gain(rx_ch, args.rx_gain)
-            .unwrap_or_else(|e| fail(format!("set RX gain: {e}")));
-    }
-    let stream_config = stream_config_for(hardware_rate);
-    if args.tx_enabled {
-        let stream = BladeRfAny::tx_streamer_arc::<ComplexI16>(
-            dev.clone(),
-            stream_config,
-            ChannelLayoutTx::SISO(tx_channel),
-        )
-        .unwrap_or_else(|e| fail(format!("create TX streamer: {e}")));
-        stream
-            .enable()
-            .unwrap_or_else(|e| fail(format!("enable TX1: {e}")));
-        tx_radio = Some(BladeTx {
-            dev: dev.clone(),
-            channel: tx_ch,
-            layout: tx_channel,
-            stream: Some(stream),
-        });
-    }
-    if args.rx_enabled {
-        let stream = BladeRfAny::rx_streamer_arc::<ComplexI16>(
-            dev.clone(),
-            stream_config,
-            ChannelLayoutRx::SISO(rx_channel),
-        )
-        .unwrap_or_else(|e| fail(format!("create RX streamer: {e}")));
-        stream
-            .enable()
-            .unwrap_or_else(|e| fail(format!("enable RX: {e}")));
-        rx_radio = Some(BladeRx {
-            dev: dev.clone(),
-            channel: rx_ch,
-            layout: rx_channel,
-            stream: Some(stream),
-        });
-    }
+    let radios = radio::open(
+        &args.radio,
+        &RadioConfig {
+            tx_enabled: args.tx_enabled,
+            rx_enabled: args.rx_enabled,
+            tx_freq_hz: args.tx_freq,
+            rx_freq_hz: args.rx_freq,
+            tx_gain_db: args.tx_gain,
+            rx_gain_db: args.rx_gain,
+            sample_rate_hz: hardware_rate,
+            analog_bandwidth_hz: analog_bandwidth,
+            device_args: args.device_args.clone(),
+            tx_channel: args.tx_channel,
+            rx_channel: args.rx_channel,
+            loopback: args.loopback.clone(),
+        },
+    )
+    .unwrap_or_else(|e| fail(e));
+    let (mut tx_radio, mut rx_radio) = (radios.tx, radios.rx);
 
     // ---- KISS: one socket, both directions ----
     let kiss = Arc::new(
@@ -682,11 +517,11 @@ fn main() {
                 STATUS_INTERVAL,
             );
             println!("[modem] engines stopped; disabling streams");
-            if let Some(stream) = tx_radio.as_ref().and_then(|r| r.stream.as_ref()) {
-                let _ = stream.disable();
+            if let Some(r) = tx_radio.as_mut() {
+                r.stop();
             }
-            if let Some(stream) = rx_radio.as_ref().and_then(|r| r.stream.as_ref()) {
-                let _ = stream.disable();
+            if let Some(r) = rx_radio.as_mut() {
+                r.stop();
             }
             println!("[modem] streams disabled");
             result

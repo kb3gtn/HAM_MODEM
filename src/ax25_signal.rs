@@ -26,7 +26,7 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use bladerf::ComplexI16;
+use crate::Iq16;
 
 use crate::conv::ConvEncoder;
 use crate::hdlc;
@@ -135,7 +135,7 @@ impl Ax25TxSignalGenerator {
     /// Produce the next fixed-size chunk of hardware-rate IQ samples -
     /// identical tail shape to `TxSignalGenerator::next_chunk`, just pulling
     /// bits from the KISS/AX.25 source above instead of a `TxBert`.
-    pub fn next_chunk(&mut self) -> Vec<ComplexI16> {
+    pub fn next_chunk(&mut self) -> Vec<Iq16> {
         let needed = self.resampler.input_frames_needed() * 2;
         while self.fifo.len() < needed {
             let bps = self.modulation.bits_per_symbol();
@@ -176,7 +176,7 @@ impl Ax25TxSignalGenerator {
                 let q_val = q_shifted * self.output_scale;
                 let i = (i_val * 2048.0).round().clamp(-2048.0, 2047.0) as i16;
                 let q = (q_val * 2048.0).round().clamp(-2048.0, 2047.0) as i16;
-                ComplexI16::new(i, q)
+                Iq16::new(i, q)
             })
             .collect()
     }

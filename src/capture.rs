@@ -37,17 +37,7 @@ pub const CHUNK_FRAMES: usize = 8192;
 pub const MAX_RESAMPLE_RATIO_RELATIVE: f64 = 10.0;
 pub const PSD_FFT_SIZE: usize = 4096;
 
-pub fn parse_pattern(s: &str) -> PrbsPattern {
-    match s.to_lowercase().as_str() {
-        "pn11" => PrbsPattern::Pn11,
-        "pn23" => PrbsPattern::Pn23,
-        "pn15" => PrbsPattern::Pn15,
-        other => {
-            eprintln!("Unknown pattern '{other}', defaulting to pn15");
-            PrbsPattern::Pn15
-        }
-    }
-}
+pub use crate::prbs::parse_pattern;
 
 #[derive(Clone, Copy)]
 pub struct CaptureConfig {

@@ -14,7 +14,7 @@
 //! BERT bank below does it for PRBS, and `hdlc::RotationResolvingDeframer`
 //! does it for framed data.
 
-use bladerf::ComplexI16;
+use crate::Iq16;
 use num_complex::Complex32;
 use std::collections::VecDeque;
 
@@ -238,7 +238,7 @@ impl RxSignalProcessor {
     /// complex symbols produced by this call (zero or more), each of which
     /// has also been demapped under all 8 rotation hypotheses and clocked
     /// into the embedded BERT bank.
-    pub fn process(&mut self, hw_iq: &[ComplexI16]) -> Vec<Complex32> {
+    pub fn process(&mut self, hw_iq: &[Iq16]) -> Vec<Complex32> {
         self.input_fifo.extend(complex_i16_to_f32(hw_iq));
 
         let chunk_frames = self.resampler.input_chunk_frames();
@@ -627,13 +627,13 @@ mod tests {
 
     /// Rotate hardware IQ by a constant carrier phase (and add nothing else):
     /// models an arbitrary unknown channel phase.
-    fn rotate(chunk: &[ComplexI16], phase: f64) -> Vec<ComplexI16> {
+    fn rotate(chunk: &[Iq16], phase: f64) -> Vec<Iq16> {
         let (s, c) = phase.sin_cos();
         chunk
             .iter()
             .map(|x| {
                 let (i, q) = (f64::from(x.re), f64::from(x.im));
-                ComplexI16::new(
+                Iq16::new(
                     (i * c - q * s).round() as i16,
                     (i * s + q * c).round() as i16,
                 )
@@ -1191,8 +1191,7 @@ mod tests {
         let mut tx = make_tx(15_000.0);
         let mut rx = make_rx(15_000.0);
         let mut noise = Noise(0x1234_ABCD);
-        let chunks: Vec<Vec<ComplexI16>> =
-            (0..400).map(|_| rotate(&tx.next_chunk(), 1.1)).collect();
+        let chunks: Vec<Vec<Iq16>> = (0..400).map(|_| rotate(&tx.next_chunk(), 1.1)).collect();
         let power: f64 = chunks
             .iter()
             .flatten()
@@ -1203,12 +1202,12 @@ mod tests {
             power * (HARDWARE_SAMPLE_RATE as f64 / SYMBOL_RATE_HZ) / 10f64.powf(es_n0_db / 10.0);
         let per_axis = (sigma2 / 2.0).sqrt();
         for chunk in &chunks {
-            let noisy: Vec<ComplexI16> = chunk
+            let noisy: Vec<Iq16> = chunk
                 .iter()
                 .map(|c| {
                     let i = f64::from(c.re) + per_axis * noise.gauss();
                     let q = f64::from(c.im) + per_axis * noise.gauss();
-                    ComplexI16::new(
+                    Iq16::new(
                         i.round().clamp(-2048.0, 2047.0) as i16,
                         q.round().clamp(-2048.0, 2047.0) as i16,
                     )
@@ -1304,7 +1303,7 @@ mod tests {
         let mut tx = make_tx(15_000.0);
         let mut rx = make_rx(15_000.0);
         let mut noise = Noise(0x0BAD_F00D);
-        let chunks: Vec<Vec<ComplexI16>> = (0..300).map(|_| tx.next_chunk()).collect();
+        let chunks: Vec<Vec<Iq16>> = (0..300).map(|_| tx.next_chunk()).collect();
         let power: f64 = chunks
             .iter()
             .flatten()
@@ -1316,10 +1315,10 @@ mod tests {
             / 2.0)
             .sqrt();
         for chunk in &chunks {
-            let noisy: Vec<ComplexI16> = chunk
+            let noisy: Vec<Iq16> = chunk
                 .iter()
                 .map(|c| {
-                    ComplexI16::new(
+                    Iq16::new(
                         (f64::from(c.re) + per_axis * noise.gauss()).round() as i16,
                         (f64::from(c.im) + per_axis * noise.gauss()).round() as i16,
                     )
@@ -1344,7 +1343,7 @@ mod tests {
         let mut tx = make_tx(15_000.0);
         let mut rx = make_rx(15_000.0);
         let mut noise = Noise(seed);
-        let chunks: Vec<Vec<ComplexI16>> = (0..chunks_n).map(|_| tx.next_chunk()).collect();
+        let chunks: Vec<Vec<Iq16>> = (0..chunks_n).map(|_| tx.next_chunk()).collect();
         let power: f64 = chunks
             .iter()
             .flatten()
@@ -1356,10 +1355,10 @@ mod tests {
             / 2.0)
             .sqrt();
         for chunk in &chunks {
-            let noisy: Vec<ComplexI16> = chunk
+            let noisy: Vec<Iq16> = chunk
                 .iter()
                 .map(|c| {
-                    ComplexI16::new(
+                    Iq16::new(
                         (f64::from(c.re) + per_axis * noise.gauss()).round() as i16,
                         (f64::from(c.im) + per_axis * noise.gauss()).round() as i16,
                     )
@@ -1438,10 +1437,10 @@ mod tests {
                 / 10f64.powf(es_n0_db / 10.0)
                 / 2.0)
                 .sqrt();
-            let noisy: Vec<ComplexI16> = chunk
+            let noisy: Vec<Iq16> = chunk
                 .iter()
                 .map(|c| {
-                    ComplexI16::new(
+                    Iq16::new(
                         (f64::from(c.re) + per_axis * noise.gauss()).round() as i16,
                         (f64::from(c.im) + per_axis * noise.gauss()).round() as i16,
                     )

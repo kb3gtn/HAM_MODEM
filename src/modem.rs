@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use bladerf::ComplexI16;
+use crate::Iq16;
 use crossbeam_channel::Receiver;
 use serde::{Deserialize, Serialize};
 
@@ -80,22 +80,63 @@ pub trait Telemetry: Send + Sync {
 pub trait TxRadio {
     /// Hand a chunk of hardware-rate IQ to the radio. Blocking here (until the
     /// radio can take more) is what paces the whole TX loop.
-    fn write(&mut self, iq: &[ComplexI16]) -> Result<(), String>;
+    fn write(&mut self, iq: &[Iq16]) -> Result<(), String>;
     fn set_gain(&mut self, db: i32) -> Result<(), String>;
     fn set_frequency(&mut self, hz: u64) -> Result<(), String>;
     /// Stop the stream, change the IQ sample rate and analog bandwidth, and
     /// start streaming again. Called only between engine runs (see
     /// `run_engines`), never while `write` is in progress.
     fn set_sample_rate(&mut self, hz: u32, analog_bandwidth_hz: u32) -> Result<(), String>;
+    /// Stop streaming ahead of shutdown. Default: nothing to do.
+    fn stop(&mut self) {}
 }
 
 pub trait RxRadio {
     /// Fill `buf` completely with hardware-rate IQ (blocking).
-    fn read(&mut self, buf: &mut [ComplexI16]) -> Result<(), String>;
+    fn read(&mut self, buf: &mut [Iq16]) -> Result<(), String>;
     fn set_gain(&mut self, db: i32) -> Result<(), String>;
     fn set_frequency(&mut self, hz: u64) -> Result<(), String>;
     /// As `TxRadio::set_sample_rate`.
     fn set_sample_rate(&mut self, hz: u32, analog_bandwidth_hz: u32) -> Result<(), String>;
+    /// Stop streaming ahead of shutdown. Default: nothing to do.
+    fn stop(&mut self) {}
+}
+
+/// Lets a backend chosen at run time (`radio::open`) drive the engines.
+impl TxRadio for Box<dyn TxRadio + Send> {
+    fn write(&mut self, iq: &[Iq16]) -> Result<(), String> {
+        (**self).write(iq)
+    }
+    fn set_gain(&mut self, db: i32) -> Result<(), String> {
+        (**self).set_gain(db)
+    }
+    fn set_frequency(&mut self, hz: u64) -> Result<(), String> {
+        (**self).set_frequency(hz)
+    }
+    fn set_sample_rate(&mut self, hz: u32, bw: u32) -> Result<(), String> {
+        (**self).set_sample_rate(hz, bw)
+    }
+    fn stop(&mut self) {
+        (**self).stop()
+    }
+}
+
+impl RxRadio for Box<dyn RxRadio + Send> {
+    fn read(&mut self, buf: &mut [Iq16]) -> Result<(), String> {
+        (**self).read(buf)
+    }
+    fn set_gain(&mut self, db: i32) -> Result<(), String> {
+        (**self).set_gain(db)
+    }
+    fn set_frequency(&mut self, hz: u64) -> Result<(), String> {
+        (**self).set_frequency(hz)
+    }
+    fn set_sample_rate(&mut self, hz: u32, bw: u32) -> Result<(), String> {
+        (**self).set_sample_rate(hz, bw)
+    }
+    fn stop(&mut self) {
+        (**self).stop()
+    }
 }
 
 /// Why an engine's `run` returned.
@@ -854,7 +895,7 @@ impl RxEngine {
         stop: &AtomicBool,
         status_interval: Duration,
     ) -> Result<RunOutcome, String> {
-        let mut buf = vec![ComplexI16::new(0, 0); chunk_frames_for(self.hardware_rate)];
+        let mut buf = vec![Iq16::new(0, 0); chunk_frames_for(self.hardware_rate)];
         let mut last_status = Instant::now();
         while !stop.load(Ordering::Relaxed) {
             while let Ok(cmd) = control.try_recv() {
@@ -1081,14 +1122,14 @@ mod tests {
     type RateLog = Arc<Mutex<Vec<(u32, u32)>>>;
 
     struct MockTx {
-        link: Sender<Vec<ComplexI16>>,
+        link: Sender<Vec<Iq16>>,
         shutdown: Arc<AtomicBool>,
         gain: Arc<Mutex<i32>>,
         freq: Arc<Mutex<u64>>,
         rates: RateLog,
     }
     impl TxRadio for MockTx {
-        fn write(&mut self, iq: &[ComplexI16]) -> Result<(), String> {
+        fn write(&mut self, iq: &[Iq16]) -> Result<(), String> {
             // Bounded link = the pacing; never hang forever once the RX is gone.
             let mut chunk = Some(iq.to_vec());
             let mut waited = 0;
@@ -1126,15 +1167,15 @@ mod tests {
     }
 
     struct MockRx {
-        link: Receiver<Vec<ComplexI16>>,
-        pending: VecDeque<ComplexI16>,
+        link: Receiver<Vec<Iq16>>,
+        pending: VecDeque<Iq16>,
         shutdown: Arc<AtomicBool>,
         gain: Arc<Mutex<i32>>,
         freq: Arc<Mutex<u64>>,
         rates: RateLog,
     }
     impl RxRadio for MockRx {
-        fn read(&mut self, buf: &mut [ComplexI16]) -> Result<(), String> {
+        fn read(&mut self, buf: &mut [Iq16]) -> Result<(), String> {
             let mut waited = 0;
             while self.pending.len() < buf.len() {
                 match self.link.recv_timeout(Duration::from_millis(100)) {
@@ -1144,7 +1185,7 @@ mod tests {
                         // Shutting down, or the TX stopped for a sample-rate
                         // change: return silence rather than block forever.
                         if self.shutdown.load(Ordering::Relaxed) || waited >= 5 {
-                            buf.fill(ComplexI16::new(0, 0));
+                            buf.fill(Iq16::new(0, 0));
                             return Ok(());
                         }
                     }
@@ -1205,7 +1246,7 @@ mod tests {
 
         let shutdown = Arc::new(AtomicBool::new(false));
         let telemetry = Arc::new(Collect::default());
-        let (link_tx, link_rx) = bounded::<Vec<ComplexI16>>(4);
+        let (link_tx, link_rx) = bounded::<Vec<Iq16>>(4);
         let (tx_ctl, tx_ctl_rx) = unbounded::<TxControlMsg>();
         let (rx_ctl, rx_ctl_rx) = unbounded::<RxControlMsg>();
         let (tx_gain, tx_freq) = (Arc::new(Mutex::new(0)), Arc::new(Mutex::new(0)));
@@ -1391,7 +1432,7 @@ mod tests {
 
         let shutdown = Arc::new(AtomicBool::new(false));
         let telemetry = Arc::new(Collect::default());
-        let (link_tx, link_rx) = bounded::<Vec<ComplexI16>>(4);
+        let (link_tx, link_rx) = bounded::<Vec<Iq16>>(4);
         let (tx_ctl, tx_ctl_rx) = unbounded::<TxControlMsg>();
         let (rx_ctl, rx_ctl_rx) = unbounded::<RxControlMsg>();
         let zero = || (Arc::new(Mutex::new(0)), Arc::new(Mutex::new(0u64)));
@@ -1629,7 +1670,7 @@ mod tests {
 
         let shutdown = Arc::new(AtomicBool::new(false));
         let telemetry = Arc::new(Collect::default());
-        let (link_tx, link_rx) = bounded::<Vec<ComplexI16>>(4);
+        let (link_tx, link_rx) = bounded::<Vec<Iq16>>(4);
         let (tx_ctl, tx_ctl_rx) = unbounded::<TxControlMsg>();
         let (rx_ctl, rx_ctl_rx) = unbounded::<RxControlMsg>();
         let zero = || (Arc::new(Mutex::new(0)), Arc::new(Mutex::new(0u64)));
@@ -1764,7 +1805,7 @@ mod tests {
     fn a_failing_radio_stops_the_engine_with_an_error() {
         struct DeadTx;
         impl TxRadio for DeadTx {
-            fn write(&mut self, _: &[ComplexI16]) -> Result<(), String> {
+            fn write(&mut self, _: &[Iq16]) -> Result<(), String> {
                 Err("usb unplugged".into())
             }
             fn set_gain(&mut self, _: i32) -> Result<(), String> {
